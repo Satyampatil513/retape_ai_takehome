@@ -10,7 +10,7 @@ compute the minimum extra funding. Spec: [`ASSIGNMENT.md`](./ASSIGNMENT.md).
 pip install -r requirements.txt
 
 python run.py cases/case1_feasible_even    # evaluate a case, print the Result
-python -m pytest -q                        # 65 tests, ~3s
+python -m pytest -q                        # 67 tests, ~3s
 
 python tools/trace.py cases/case4_tiers    # show the solver's work
 ```
@@ -74,10 +74,20 @@ lands inside the horizon with no cadence date left to spend it. Shortfall = $100
 **`even_pays`** -> all equal, remainder cents onto the latest payments (S5.7).
 `max_segments` ignored. We still search `k`.
 
-**`is_ballooning_allowed`** -> a balloon candidate is offered: every payment at its
-floor except the last, which absorbs the remainder. `max_segments` ignored; needs
-`k >= 2`; rejected if the remainder falls below the previous payment or its own floor.
-Ballooning is permitted, not mandatory, so staircases compete alongside it.
+**`is_ballooning_allowed`** -> one balloon per `k`: every payment at its floor except
+the last, which absorbs the remainder. `max_segments` ignored; needs `k >= 2`.
+
+Ballooning is permitted rather than mandatory, so staircases ought to compete -- but
+they cannot win. A balloon puts every position on its **own** floor; a staircase run is
+one level, so a run spanning a floor jump drags its earlier positions up to `top - 1`.
+The balloon's prefix sums are therefore the pointwise minimum over every valid vector
+at that `k`, giving weakly higher balances and weakly higher fee capacity. So where a
+balloon exists we skip the staircases entirely, and only `k = 1` (where a balloon
+cannot exist) still needs them.
+
+That the balloon exists at all is the same fact: it costs exactly `sum(floors)`, which
+is the least any valid vector at that `k` can cost, so it exists whenever anything
+does. Both claims are pinned by tests.
 
 **Otherwise -> staircase.** We enumerate every way to cut `k` positions into `s`
 contiguous runs, for `s` in `1..max_segments`. Each run sits at its floor; the
@@ -85,6 +95,14 @@ remainder lands on the **final** run, keeping early payments as small as the rul
 allow. At `k <= 12` that's a few hundred vectors, so we generate them all and let the
 objective choose rather than guessing where a step belongs. `s = 1` reproduces the flat
 vector, so the flattest and most back-loaded shapes both compete.
+
+Across cut sets there is no single cheapest vector, which is why they are all kept: a
+cut placed earlier lets position 1 sit on its own low floor but leaves a bigger tail,
+while a later cut drags the early positions up to `top - 1` and leaves a smaller one.
+With floors `[200, 900, 900, 900]` and a total of 4000 that is `[200, 1266, 1267, 1267]`
+against `[899, 900, 900, 1301]` -- prefix sums 200/1466/2733 versus 899/1799/2699,
+neither pointwise below the other. Which one wins depends on where the client's cash is
+pinched, and both do win for some ledger.
 
 **Floors** combine three rules at 1-based position `i`:
 
@@ -309,7 +327,7 @@ a tenth of a second.
 
 # Tests
 
-`python -m pytest -q` -- 65 tests, ~3s.
+`python -m pytest -q` -- 67 tests, ~3s.
 
 The centrepiece is `tests/helpers.py::assert_valid_schedule`, an **independent
 validator** that re-derives the cadence, floors and totals from raw inputs and

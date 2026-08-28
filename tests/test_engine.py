@@ -465,3 +465,58 @@ def test_solver_matches_exhaustive_search_on_small_cases():
             compared += 1
 
     assert compared >= 100, f"only {compared} feasible cases generated; widen the fuzz"
+
+
+def test_a_valid_balloon_makes_staircases_at_that_k_redundant():
+    """One candidate per k while ballooning, except where no balloon exists.
+
+    A balloon puts every position on its own floor. A staircase run is one
+    level, so a run spanning a floor jump drags its earlier positions up to
+    top - 1. The balloon's prefix sums are therefore the pointwise minimum over
+    every valid vector at that k, which means weakly higher balances and weakly
+    higher fee capacity -- no staircase at that k can win.
+    """
+    client, offer, rules = load_case("cases/case3_balloon")
+    cadence = cadence_dates(client, offer)
+    by_k = {}
+    for cand in candidates(cadence, offer, rules):
+        by_k.setdefault(len(cand.payments), []).append(cand)
+
+    for k, cands in by_k.items():
+        if k == 1:
+            # a balloon needs k >= 2, so k=1 still comes from the staircase path
+            assert [c.shape for c in cands] == ["even"]
+        else:
+            assert [c.shape for c in cands] == ["balloon"], f"k={k} still offers staircases"
+
+
+def test_a_balloon_exists_whenever_any_vector_does_for_k_at_least_2():
+    """So skipping staircases under a valid balloon only ever leaves k=1 to them.
+
+    The balloon is exactly the pointwise floors plus the remainder, so it needs
+    `total >= sum(floors)` -- which is the least ANY valid vector at that k can
+    cost. It therefore exists whenever anything does, for k >= 2.
+    """
+    import random
+
+    from feasibility.models import CreditorRules
+    from tests.helpers import random_case
+
+    rng = random.Random(3)
+    checked = 0
+    for _ in range(400):
+        _, offer, base = random_case(rng)
+        rules = CreditorRules(
+            base.max_terms, base.max_payments, base.min_payment_cents,
+            base.max_token_pays, base.min_payment_tiers, False, True,
+            base.max_segments, base.bank_fee_cents, base.program_fee_pct,
+        )
+        total = offer_total_cents(offer)
+        for k in range(2, min(rules.max_payments, rules.max_terms) + 1):
+            stairs = list(staircase_vectors(k, total, rules))
+            if stairs:
+                assert balloon_vector(k, total, rules) is not None, (
+                    f"k={k} has staircases {stairs[:2]} but no balloon"
+                )
+                checked += 1
+    assert checked >= 50, f"only {checked} comparisons made; widen the fuzz"
