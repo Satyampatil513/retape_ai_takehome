@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so `feasibility` and `tests` import cleanly no
+# matter which directory pytest is invoked from.
+pythonpath = ["."]
+testpaths = ["tests"]
