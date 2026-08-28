@@ -117,3 +117,25 @@ def solve(
             best = Solution(cand.payments, cand.shape, sim.rows, sim.cum_fee)
 
     return Outcome(best, structurally_possible)
+
+
+def is_feasible(
+    client: Client,
+    offer: Offer,
+    rules: CreditorRules,
+    extra_credits: Iterable[tuple[date, int]] = (),
+) -> bool:
+    """Does *any* valid schedule fit? Short-circuits on the first one.
+
+    The funding search only needs a yes/no, not the best schedule, so this
+    skips the ranking that solve() does.
+    """
+    cadence = cadence_dates(client, offer)
+    if not cadence:
+        return False
+    fee_total = program_fee_cents(offer, rules)
+    extra = list(extra_credits)
+    for cand in candidates(cadence, offer, rules):
+        if simulate(client, cadence, cand.payments, rules, fee_total, extra).ok:
+            return True
+    return False

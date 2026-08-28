@@ -11,6 +11,7 @@ The output dataclasses live in ``results`` and are re-exported here so
 
 from __future__ import annotations
 
+from feasibility.funding import additional_funds
 from feasibility.models import Client, CreditorRules, Offer
 from feasibility.results import (  # noqa: F401  (re-exported)
     AdditionalFunds,
@@ -37,5 +38,9 @@ def evaluate_offer(client: Client, offer: Offer, rules: CreditorRules) -> Result
             additional_funds=None,
         )
 
-    # Part 2 (minimum additional funds) -- next phase.
-    return Result(feasible=False, pay_shape_used=None, schedule=None, additional_funds=None)
+    return Result(
+        feasible=False,
+        pay_shape_used=None,
+        schedule=None,
+        additional_funds=additional_funds(client, offer, rules, outcome.structurally_possible),
+    )
