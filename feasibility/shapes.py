@@ -20,11 +20,7 @@ from feasibility.models import (
     monthly_payment_dates,
 )
 
-# When ballooning is disallowed, should we also forbid a staircase whose final
-# segment is a single payment? Our reading of S5.9 says no -- `max_segments` is
-# the only structural cap on a staircase, and with tiers present it is usually
-# binding on its own (see README). Flip this to True to make
-# `is_ballooning_allowed=False` structurally exclude balloon-alikes.
+# True would also bar balloon-alike staircases; we read S5.9 as capping only segments.
 REQUIRE_NON_BALLOON_TAIL = False
 
 
@@ -180,9 +176,7 @@ def staircase_vectors(k: int, total: int, rules: CreditorRules) -> Iterator[list
 
     max_runs = min(max(rules.max_segments, 1), k)
     emitted: set[tuple[int, ...]] = set()
-    # (position, head) -> the fewest runs we have reached that state with. Reaching
-    # the same head with fewer runs spent is strictly better, since it leaves more
-    # cuts available downstream, so only a cheaper arrival is worth re-expanding.
+    # Keyed on the fewest runs spent: arriving cheaper leaves more cuts downstream.
     expanded: dict[tuple[int, tuple[int, ...]], int] = {}
 
     def walk(start: int, head: list[int], head_sum: int, prev: int, runs_used: int):
@@ -192,11 +186,10 @@ def staircase_vectors(k: int, total: int, rules: CreditorRules) -> Iterator[list
             return
         expanded[state] = runs_used
 
-        # Close here: positions [start, k) become the absorbing final run.
+        # Close here: [start, k) absorbs the remainder.
         length = k - start
         rest = total - head_sum
-        # Necessary: the run must cover its own floors, and its spread starts at
-        # rest // length, which may not dip below the previous run.
+        # Both necessary for validity, so failing either prunes a whole subtree.
         if rest >= floors_from[start] and rest >= prev * length:
             v = head + _spread(rest, length)
             if not (
@@ -210,14 +203,14 @@ def staircase_vectors(k: int, total: int, rules: CreditorRules) -> Iterator[list
                     emitted.add(key)
                     yield v
 
-        # Or extend: [start, cut) becomes one more leading run.
+        # Or extend: one more leading run.
         if runs_used + 1 >= max_runs:
             return
         for cut in range(start + 1, k):
             top = max(floors[start:cut])
             values = [max(f, top - 1, prev) for f in floors[start:cut]]
             run_sum = sum(values)
-            # Nothing after this run can cost less than its own floors.
+            # Unaffordable, and only worsens as `cut` grows, so stop rather than skip.
             if head_sum + run_sum + floors_from[cut] > total:
                 break  # runs only get longer and dearer as `cut` grows
             yield from walk(cut, head + values, head_sum + run_sum, values[-1], runs_used + 1)

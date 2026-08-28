@@ -13,7 +13,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 
 def _dec(value: Decimal | int | float | str) -> Decimal:
-    # Decimal(str(x)) so 0.4 stays 0.4 rather than 0.4000000000000000222...
+    # str() first, or 0.4 arrives as 0.4000000000000000222 and drags the cent with it.
     return value if isinstance(value, Decimal) else Decimal(str(value))
 
 

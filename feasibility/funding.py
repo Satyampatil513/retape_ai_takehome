@@ -31,7 +31,7 @@ INCREMENT_FLOOR_CENTS = 10000  # X may always reach $100 regardless of draft siz
 INCREMENT_PCT_OF_DRAFT = 0.40
 LUMP_PCT_OF_OFFER = 0.65
 
-# Called with (lo, hi, probe, feasible) at each bisection step. See tools/trace.py.
+# Observes each bisection step for tools/trace.py; cannot change the answer.
 Probe = Callable[[int, int, int, bool], None]
 
 
@@ -151,7 +151,7 @@ def minimum_monthly_increment(
         on_probe,
     )
     if amount is None:
-        # Every remaining draft can land after the last usable cadence date.
+        # Reachable: every remaining draft can land after the last usable cadence date.
         return FundsOption(
             amount_cents=0,
             within_guardrail=False,

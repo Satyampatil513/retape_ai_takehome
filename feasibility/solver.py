@@ -42,8 +42,7 @@ class Solution:
 @dataclass(frozen=True)
 class Outcome:
     solution: Solution | None
-    # False when no vector satisfies the creditor rules at any k, i.e. the
-    # offer is unschedulable on structure alone and no amount of cash helps.
+    # False means unschedulable on structure alone, so no amount of cash helps.
     structurally_possible: bool
 
 
@@ -71,13 +70,7 @@ def candidates(
             v = balloon_vector(k, total, rules)
             if v is not None:
                 yield Candidate(v, "balloon", True)
-                # No staircase at this k can beat it. A balloon puts every
-                # position on its OWN floor; a staircase run is one level, so a
-                # run spanning a floor jump drags its earlier positions up to
-                # top - 1. That makes the balloon's prefix sums the pointwise
-                # minimum over every valid vector at this k -- weakly higher
-                # balances, weakly higher fee capacity -- and the balloon also
-                # wins the tie-break. So the staircases here are dead weight.
+                # A balloon sits on every floor at once; no staircase here can undercut it.
                 continue
         for v in staircase_vectors(k, total, rules):
             yield Candidate(v, _label(v, False), False)

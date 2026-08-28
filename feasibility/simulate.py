@@ -48,9 +48,9 @@ class Trace:
     dates: list[date]
     credits: dict[date, int]
     debits: dict[date, int]
-    # Running balance with payments and bank fees but no program fee (pass A).
+    # Pass A: the trajectory the fee is then carved out of.
     balances: dict[date, int]
-    # min(balances[d'] for d' >= d) -- the ceiling on fee pulled at d (pass B).
+    # Pass B: min balance from d onward, so fee pulled at d cannot starve a later date.
     suffix_min: dict[date, int]
     fee_on: dict[date, int]
     reason: str  # empty when the run succeeded
@@ -60,10 +60,9 @@ class Trace:
 class Sim:
     ok: bool
     rows: list[ScheduleRow]
-    # Cumulative fee collected as of each cadence date. Always one entry per
-    # cadence date, so vectors from different candidates compare element-wise.
+    # One entry per cadence date, so candidates compare element-wise.
     cum_fee: tuple[int, ...]
-    # Populated only when simulate(..., trace=True); None on the hot path.
+    # None on the hot path; only built under trace=True.
     trace: Trace | None = None
 
 
@@ -126,8 +125,7 @@ def simulate(
     credits, debits, all_dates = timeline.credits, timeline.debits, timeline.dates
     pay_on = {cadence[i]: payments[i] for i in range(len(payments))}
 
-    # Pass A -- no fee. Credits before debits on each date (S3); the balance is
-    # checked once per date, after everything that day has landed.
+    # Credits before debits (S3); checked once per date, after the day has landed.
     balance = client.current_balance_cents
     balances: dict[date, int] = {}
     for d in all_dates:
@@ -143,17 +141,14 @@ def simulate(
             )
         balances[d] = balance
 
-    # Suffix minima over *all* dates, not just cadence dates: a fixed ledger
-    # debit between two cadence dates constrains how much fee we may pull early.
+    # Over *all* dates: a debit between cadence dates also limits an early pull.
     suffix_min: dict[date, int] = {}
     running: int | None = None
     for d in reversed(all_dates):
         running = balances[d] if running is None else min(running, balances[d])
         suffix_min[d] = running
 
-    # Pass B -- fee, front-loaded as hard as the suffix minima allow. The first
-    # cadence date IS first_payment_date, so S5.6a (no fee before the first
-    # creditor payment) holds by construction.
+    # Starting at cadence index 0 (= first_payment_date) satisfies S5.6a by construction.
     remaining = fee_total
     taken = 0
     fee_on: dict[date, int] = {}
@@ -165,7 +160,7 @@ def simulate(
         remaining -= amount
         cum_fee.append(taken)
     if remaining > 0:
-        # fee not fully collected by the horizon (S5.6b)
+        # Greedy already took the most possible, so nothing else could finish it (S5.6b).
         return _fail(
             f"{remaining} of the {fee_total} program fee is still uncollected at the horizon",
             trace, all_dates, credits, debits, balances, suffix_min, fee_on,
@@ -184,7 +179,7 @@ def simulate(
                 date=d,
                 creditor_payment_cents=payment,
                 program_fee_cents=fee,
-                # A fee-only date carries no bank fee (S5.5).
+                # S5.5: no bank fee on a fee-only date.
                 bank_fee_cents=rules.bank_fee_cents if payment else 0,
                 balance_cents=balances[d] - taken,
             )

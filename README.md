@@ -173,7 +173,7 @@ so moving it earlier flips that indicator on sooner and never off -- the balance
 weakly higher everywhere and any `L` that worked still works. Hence `minL(date)` is
 non-decreasing. A property test enforces it: *if `L` is minimal at the earliest date,
 `L - 1` must fail at every later date.* A whole range of dates ties at that minimum
-(Jan 1 through Apr 30 in case 2); we report the earliest (assumption 7).
+(Jan 1 through Apr 30 in case 2); we report the earliest (assumption 6).
 
 **Monthly increment** goes on every ledger credit after `as_of_date` (S3: the credits
 *are* the drafts). `num_drafts` counts every draft **affected**, including ones arriving
@@ -264,26 +264,29 @@ The provided cases are unaffected -- all four still evaluate in single-digit ms.
 
 # Assumptions
 
-1. `k` is ours to choose; `first_payment_date` is a hard input (S5.1).
-2. Payments and fees may land only on cadence dates.
-3. The fee window is every cadence date at or before the horizon, fee-only dates
-   included.
-4. Ledger entries on or before `as_of_date` are skipped -- already in
-   `current_balance_cents` (S3).
-5. The balance is checked once per date, after all that date's activity, credits before
-   debits. No intra-day ordering among debits.
-6. One ledger credit entry = one draft, so two credits on a date count as two drafts.
-7. The lump goes on the earliest modifiable date, not the latest date that would tie.
-   Same minimum `L` either way; the latest would be friendlier to a client but leaves
-   zero slack.
-8. A leftover balance is fine; nothing requires finishing at zero.
-9. Unused cadence dates are omitted rather than emitted as zero rows (case 4 prints 10
-   rows for 12 cadence dates).
-10. Half-up rounding wherever a percentage is applied, including both guardrails (S3).
-11. `max_terms` and `max_payments` bind identically, per the assignment's author note.
-12. A single payment is not a balloon (`k >= 2`).
-13. A structurally impossible offer reports `amount_cents: 0` with a reason rather than
-    a fabricated number. The spec doesn't define this case.
+Only the calls the spec leaves open; anything it states outright is not repeated here.
+
+1. **A one-cent difference inside a run does not open a new segment.** S5.7 grants that
+   waiver to `even`; we extend it to staircase runs, or an indivisible remainder would
+   silently consume a segment.
+2. **`pay_shape_used` is read off the winning vector, not the flags.** A creditor with
+   `even_pays: false` whose best schedule happens to be flat is reported as `even`.
+3. **A single payment is not a balloon** -- the balloon builder needs `k >= 2`. One
+   payment is the whole settlement, not a shape.
+4. **The balance is checked once per date**, after everything that day has landed. S3
+   fixes credits before debits; it does not order debits among themselves, and we do not
+   either.
+5. **One ledger credit entry is one draft**, so two credits on the same date count as
+   two drafts for the monthly increment.
+6. **The lump goes on the earliest modifiable date**, not the latest date that ties at
+   the same minimum. Both yield the same `L`; the latest would suit a client better but
+   leaves no slack.
+7. **Unused cadence dates are omitted** from the schedule rather than emitted as zero
+   rows -- case 4 prints 10 rows for a 12-date cadence.
+8. **Fewer payments is our tie-break, not a rule.** Nothing in the spec prefers a
+   smaller `k`; we do, because each payment carries a bank fee.
+9. **A structurally impossible offer reports `amount_cents: 0`** with a reason rather
+   than a fabricated number. The spec does not define this case.
 
 ---
 

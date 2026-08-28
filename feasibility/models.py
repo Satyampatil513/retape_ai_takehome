@@ -40,9 +40,7 @@ class Client:
 @dataclass
 class Offer:
     creditor: str
-    # ASSIGNMENT.md S4 renamed this from ``current_balance_cents`` (which
-    # collided with the client's SDA balance). The shipped case JSONs still use
-    # the old key, so the loader accepts either spelling.
+    # Renamed per S4; the loader still accepts the old key the case JSONs use.
     creditor_balance_cents: int
     original_balance_cents: int
     settlement_pct: float
