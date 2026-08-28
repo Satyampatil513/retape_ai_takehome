@@ -287,6 +287,8 @@ Only the calls the spec leaves open; anything it states outright is not repeated
    smaller `k`; we do, because each payment carries a bank fee.
 9. **A structurally impossible offer reports `amount_cents: 0`** with a reason rather
    than a fabricated number. The spec does not define this case.
+10. **post-horizon debit is not present** as our program runs till the horizon, we 
+   are assuming that no debit is present after horizon.
 
 ---
 
