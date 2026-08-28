@@ -220,10 +220,12 @@ minima imply different totals ($100 vs $125), as S8 predicts.
 
 # Known limitations
 
-- **Only the minimal-early fill is generated per cut set.** A schedule needing an early
-  run raised *above* its floor purely to afford a very large final payment is outside
-  the search. Both ends of the spectrum are covered, so this only bites for a case whose
-  only feasible schedule sits strictly between them.
+- **Only the cheapest fill is generated per cut set**, which loses nothing. Every valid
+  vector sums to `offer_total`, so the final date's balance is identical across all of
+  them; only the earlier dates differ, and they improve as the running total spent
+  falls. The cheapest fill minimises every prefix sum for its cut set, so it dominates
+  every other fill on both feasibility and fee capacity. Checked against exhaustive
+  enumeration -- see Tests.
 - **A staircase can be a balloon in all but name.** With `max_segments >= 2` and no
   tiers, "steps as late as possible" yields minimums then one large final payment even
   when `is_ballooning_allowed` is false. Case 3 shows it: at k=5 the staircase
@@ -262,6 +264,12 @@ balance; fee deferring past a squeezed month (`[6000, 0, 1500]`); fee-only dates
 carrying no bank fee; half-up vs banker's rounding; both Part 2 minima to the cent;
 both guardrails tripping and passing; un-fundable paths; and a seeded property test
 over random cases for the lump-placement rule.
+
+`test_solver_matches_exhaustive_search_on_small_cases` is the strongest check: on tiny
+inputs it enumerates *every* vector S5 admits, scores each with the same simulator, and
+asserts the solver ties the best. It caught two real gaps in the enumeration -- a last
+run pre-rejected against its own maximum floor, and a leading run forced to a flat
+maximum rather than positional floors -- both since fixed.
 
 # Fixes to the provided scaffolding
 

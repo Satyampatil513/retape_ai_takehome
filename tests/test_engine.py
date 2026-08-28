@@ -344,3 +344,124 @@ def test_a_cash_short_but_well_formed_offer_is_structurally_possible():
     outcome = solve(client, offer, rules)
     assert outcome.solution is None
     assert outcome.structurally_possible is True
+
+
+# --------------------------------------------------------------------------
+# Regressions: vectors the enumeration used to miss
+# --------------------------------------------------------------------------
+
+def test_last_run_may_sit_below_its_own_maximum_floor():
+    """Floors [2, 3, 5] with total 13 admits [4, 4, 5] as a single level.
+
+    The spread puts its +1 cents on the run's latest positions, which is exactly
+    where a tier step-up sits, so the run's base (4) may sit below the run's
+    maximum floor (5) while every position still clears its own floor.
+    """
+    rules = make_rules(max_terms=3, max_payments=3, min_payment_cents=2,
+                       max_token_pays=1, min_payment_tiers=[(3, 5)], max_segments=1)
+    assert [floor_at(i, rules) for i in (1, 2, 3)] == [2, 3, 5]
+    assert [4, 4, 5] in list(staircase_vectors(3, 13, rules))
+
+
+def test_leading_run_uses_positional_floors_not_a_flat_maximum():
+    """Floors [3, 4] make the leading run [3, 4], not [4, 4].
+
+    A run is one level, but the +/-1 waiver lets it hold two adjacent values, so
+    only the position carrying the run's highest floor has to reach it.
+    """
+    rules = make_rules(max_terms=3, max_payments=3, min_payment_cents=3,
+                       max_token_pays=1, min_payment_tiers=[(3, 5)], max_segments=2)
+    assert [floor_at(i, rules) for i in (1, 2, 3)] == [3, 4, 5]
+    vectors = list(staircase_vectors(3, 15, rules))
+    assert [3, 4, 8] in vectors
+    # [4, 4, 7] is the same cut set filled from a flat max. It is dominated --
+    # equal total, higher prefix sums -- so it is deliberately not generated.
+    assert [4, 4, 7] not in vectors
+
+
+def test_solver_matches_exhaustive_search_on_small_cases():
+    """The candidate enumeration must not miss a better schedule.
+
+    On deliberately tiny inputs, enumerate EVERY vector S5 admits -- all
+    non-decreasing vectors meeting the sum, the floors, the token cap and the
+    segment cap -- score each with the same simulator, and check the solver's
+    answer ties the best. This caught two real gaps in the enumeration: a last
+    run pre-rejected against its maximum floor, and a leading run forced to a
+    flat maximum instead of positional floors.
+    """
+    import random
+
+    from feasibility.models import (
+        Client, CreditorRules, LedgerEntry, Offer, add_months,
+        offer_total_cents, program_fee_cents,
+    )
+    from feasibility.simulate import simulate
+
+    def every_valid_vector(k, total, rules, cap_segments):
+        out = []
+
+        def rec(i, prev, left, acc):
+            if i == k:
+                if left:
+                    return
+                tokens = sum(1 for x in acc if x == rules.min_payment_cents)
+                if tokens > rules.max_token_pays:
+                    return
+                if cap_segments and segment_count(acc) > rules.max_segments:
+                    return
+                out.append(list(acc))
+                return
+            for v in range(max(prev, floor_at(i + 1, rules)), left + 1):
+                if v * (k - i) > left:
+                    break
+                rec(i + 1, v, left - v, acc + [v])
+
+        rec(0, 0, total, [])
+        return out
+
+    rng = random.Random(7)
+    compared = 0
+    for _ in range(700):
+        months = rng.randint(2, 5)
+        first = date(2026, 1, 1)
+        draft = rng.randint(4, 14)
+        ledger = [LedgerEntry(add_months(first, i), draft, "credit") for i in range(months)]
+        if rng.random() < 0.4:
+            ledger.append(
+                LedgerEntry(add_months(first, rng.randrange(months)), rng.randint(1, 10), "debit")
+            )
+        client = Client(draft, 1, first, add_months(first, months - 1),
+                        date(2025, 12, 31), 0, ledger)
+        offer = Offer("Rng", rng.randint(10, 60), rng.randint(10, 60), rng.choice([0.5, 1.0]),
+                      rng.choice([None, date(2026, 1, 31), date(2026, 1, 1)]))
+        kcap = rng.randint(1, 5)
+        ballooning = rng.random() < 0.3
+        rules = CreditorRules(
+            kcap, kcap, rng.randint(1, 3), rng.randint(0, 4),
+            rng.choice([[], [(2, 4)], [(3, 5)], [(2, 4), (4, 6)]]),
+            False, ballooning, rng.randint(1, 3),
+            rng.choice([0, 1]), rng.choice([0.0, 0.2, 0.5]),
+        )
+
+        cadence = cadence_dates(client, offer)
+        if not cadence:
+            continue
+        total = offer_total_cents(offer)
+        fee = program_fee_cents(offer, rules)
+
+        best = None
+        for k in range(1, min(rules.max_payments, rules.max_terms, len(cadence)) + 1):
+            # S4: the segment cap is ignored while ballooning
+            for v in every_valid_vector(k, total, rules, cap_segments=not ballooning):
+                sim = simulate(client, cadence, v, rules, fee)
+                if sim.ok and (best is None or sim.cum_fee > best):
+                    best = sim.cum_fee
+
+        solution = solve(client, offer, rules).solution
+        ours = solution.cum_fee if solution else None
+        assert (best is None) == (ours is None), "disagreed on whether any schedule fits"
+        if best is not None:
+            assert ours == best, f"exhaustive search found {best}, solver returned {ours}"
+            compared += 1
+
+    assert compared >= 100, f"only {compared} feasible cases generated; widen the fuzz"

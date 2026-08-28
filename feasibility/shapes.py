@@ -148,9 +148,13 @@ def staircase_vectors(k: int, total: int, rules: CreditorRules) -> Iterator[list
     ``s = 1`` reproduces the flat/even vector, so the flattest and the most
     back-loaded shapes are both in the candidate set.
 
-    Known limitation (README): only the minimal-early fill is generated per cut,
-    so a schedule that would need an early run raised *above* its floor purely
-    to make a large final payment affordable is outside this search.
+    Generating only the cheapest fill per cut set loses nothing. Every valid
+    vector sums to ``total``, so the balance on the final payment date is the
+    same for all of them; only the earlier dates differ, and they are better the
+    smaller the running total spent so far. The cheapest fill minimises every
+    prefix sum for its cut set, so it dominates every other fill of that cut set
+    on both feasibility and fee capacity. Verified against exhaustive
+    enumeration in tests/test_engine.py.
     """
     if k <= 0:
         return
@@ -160,27 +164,33 @@ def staircase_vectors(k: int, total: int, rules: CreditorRules) -> Iterator[list
             bounds = (0,) + cuts + (k,)
             runs = [(bounds[j], bounds[j + 1]) for j in range(s)]
 
-            levels: list[int] = []
+            # Each leading run takes the cheapest values it can. A run is one
+            # level, but the +/-1 waiver lets it hold two adjacent values, so the
+            # floor is per position rather than a flat max: with floors [3, 4]
+            # the run is [3, 4], not [4, 4]. Only the position carrying the
+            # run's highest floor has to reach it; the rest need only stay
+            # within a cent of it, and nothing may dip below the previous run.
+            head: list[int] = []
+            prev = 0
             for a, b in runs[:-1]:
-                lvl = max(floor_at(i + 1, rules) for i in range(a, b))
-                if levels:
-                    lvl = max(lvl, levels[-1])
-                levels.append(lvl)
+                floors = [floor_at(i + 1, rules) for i in range(a, b)]
+                top = max(floors)
+                values = [max(f, top - 1, prev) for f in floors]
+                head.extend(values)
+                prev = values[-1]
 
             a, b = runs[-1]
-            rest = total - sum(levels[j] * (runs[j][1] - runs[j][0]) for j in range(s - 1))
+            rest = total - sum(head)
             if rest < 0:
                 continue
-            tail_floor = max(floor_at(i + 1, rules) for i in range(a, b))
-            if levels:
-                tail_floor = max(tail_floor, levels[-1])
-            if rest < tail_floor * (b - a):
-                continue
+            # Do NOT pre-reject on the run's maximum floor here. The spread puts
+            # the +1 cents on the run's latest positions, which is exactly where
+            # a tier step-up sits, so a run whose base is below its own maximum
+            # floor can still clear every positional floor -- e.g. floors
+            # [2, 3, 5] with total 13 admits [4, 4, 5]. validate() checks the
+            # floors position by position, which is the real requirement.
 
-            v: list[int] = []
-            for j, (ra, rb) in enumerate(runs[:-1]):
-                v += [levels[j]] * (rb - ra)
-            v += _spread(rest, b - a)
+            v = head + _spread(rest, b - a)
 
             if REQUIRE_NON_BALLOON_TAIL and not rules.is_ballooning_allowed:
                 if k >= 2 and last_segment_len(v) < 2:
