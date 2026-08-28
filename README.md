@@ -46,65 +46,29 @@ tests/helpers.py  case builders, a random case generator, an independent validat
 
 # Approach
 
-Two nearly independent decisions:
-
 ```
-cadence_dates --> candidates(k, shape) --> simulate() --> rank --> best schedule
-                  (creditor rules only)    (cash only)   (objective)
+cadence dates -> for each k -> shape per flags -> simulate: place fee -> rank
+    (S3)           (S5.1)        (S5.7-5.9)         (S5.6, S5.10)        (S6)
 ```
 
-Payment placement is fixed by the spec (consecutive cadence dates from
-`first_payment_date`), so a candidate is just a vector of amounts. We enumerate every
-legal vector, place the fee optimally for each, and rank.
+One split makes this tractable: **which vector** follows from the creditor rules alone,
+no cash involved; **where the fee goes** follows from cash alone, vector already fixed.
 
-### Cadence and horizon
+## 1. Cadence, horizon, and the range of k
 
-Monthly from `first_payment_date`, truncated at the horizon (`last_draft_date`). This
-list serves two purposes: dates a payment may occupy, **and** dates the fee may be
-collected on -- including fee-only dates after the last payment, which carry no bank
-fee.
+Monthly from `first_payment_date`, truncated at the horizon (`last_draft_date`).
+Payments occupy its first `k` dates consecutively (S5.1), so a candidate is just a
+vector of amounts, with `k` in `1..min(max_payments, max_terms, len(cadence))`.
 
-That second use decides case 2. Five $100 drafts against a $400 offer plus $100 fee is
-exactly sufficient on paper, but the end-of-month cadence runs Jan 31 / Feb 28 /
-Mar 31 / Apr 30 / **May 31**, and May 31 is past the May 1 horizon. The May 1 draft
-lands inside the horizon with no cadence date left to spend it. Shortfall = $100.
+The same list is the **fee window**, fee-only dates after the last payment included
+(those carry no bank fee). That second use decides case 2: five $100 drafts against
+$400 + $100 fee is exactly enough on paper, but the end-of-month cadence jumps
+Apr 30 -> **May 31**, past the May 1 horizon. The May 1 draft lands inside the horizon
+with no cadence date left to spend it, so the shortfall is exactly $100.
 
-### Payment shapes (the open-ended part)
+## 2. Floors
 
-**`even_pays`** -> all equal, remainder cents onto the latest payments (S5.7).
-`max_segments` ignored. We still search `k`.
-
-**`is_ballooning_allowed`** -> one balloon per `k`: every payment at its floor except
-the last, which absorbs the remainder. `max_segments` ignored; needs `k >= 2`.
-
-Ballooning is permitted rather than mandatory, so staircases ought to compete -- but
-they cannot win. A balloon puts every position on its **own** floor; a staircase run is
-one level, so a run spanning a floor jump drags its earlier positions up to `top - 1`.
-The balloon's prefix sums are therefore the pointwise minimum over every valid vector
-at that `k`, giving weakly higher balances and weakly higher fee capacity. So where a
-balloon exists we skip the staircases entirely, and only `k = 1` (where a balloon
-cannot exist) still needs them.
-
-That the balloon exists at all is the same fact: it costs exactly `sum(floors)`, which
-is the least any valid vector at that `k` can cost, so it exists whenever anything
-does. Both claims are pinned by tests.
-
-**Otherwise -> staircase.** We enumerate every way to cut `k` positions into `s`
-contiguous runs, for `s` in `1..max_segments`. Each run sits at its floor; the
-remainder lands on the **final** run, keeping early payments as small as the rules
-allow. At `k <= 12` that's a few hundred vectors, so we generate them all and let the
-objective choose rather than guessing where a step belongs. `s = 1` reproduces the flat
-vector, so the flattest and most back-loaded shapes both compete.
-
-Across cut sets there is no single cheapest vector, which is why they are all kept: a
-cut placed earlier lets position 1 sit on its own low floor but leaves a bigger tail,
-while a later cut drags the early positions up to `top - 1` and leaves a smaller one.
-With floors `[200, 900, 900, 900]` and a total of 4000 that is `[200, 1266, 1267, 1267]`
-against `[899, 900, 900, 1301]` -- prefix sums 200/1466/2733 versus 899/1799/2699,
-neither pointwise below the other. Which one wins depends on where the client's cash is
-pinched, and both do win for some ledger.
-
-**Floors** combine three rules at 1-based position `i`:
+Every shape is built from the floor at 1-based position `i`:
 
 ```
 floor(i) = max( min_payment_cents,
@@ -112,137 +76,163 @@ floor(i) = max( min_payment_cents,
                 min_cents               for each tier with from_payment <= i )
 ```
 
-The token rule is a *strict* exceed, hence the extra cent. Because payments are
-non-decreasing, the ones sitting at the base minimum are always a prefix -- which is
-what makes this positional formula exact. A balloon's "minimum-ish" prefix means
-floors in this full sense, so a balloon with `k - 1 > max_token_pays` steps up a cent
-at the cap.
+The token rule is a *strict* exceed, hence the extra cent. Payments are non-decreasing,
+so those at the base minimum are always a prefix -- which makes this positional formula
+exact rather than an approximation.
 
-A **±1-cent difference inside a run doesn't open a new segment** -- the remainder
-waiver S5.7 grants `even`, extended to staircase runs.
+## 3. Shape: three cases per k
 
-`pay_shape_used` is derived from the winning vector, not the flags: one level ->
-`even`, balloon builder -> `balloon`, else `staircase`.
+| flag | per k | vector |
+|---|---|---|
+| `even_pays` | 1 | all equal, remainder cents onto the latest (S5.7) |
+| `is_ballooning_allowed` | 1 | every position on its floor, last absorbs the remainder |
+| neither | many | staircases -- step 4 |
 
-### Objective
+`max_segments` is ignored in the first two (S4).
 
-**Lexicographic maximum of the cumulative fee collected by cadence date 1, then 2,
-then 3...** All candidates produce equal-length vectors, so they compare element-wise.
-The shape is an outcome of this, never hard-coded. Ties break by:
+Ballooning is permitted rather than mandatory, so staircases ought to compete -- but
+cannot win. A balloon puts every position on its **own** floor; a staircase run is one
+level, so a run spanning a floor jump drags its earlier positions up to `top - 1`. The
+balloon's prefix sums are therefore the pointwise minimum over every valid vector at
+that `k`, so where one exists we skip the staircases. Only `k = 1` still needs them: a
+balloon costs exactly `sum(floors)`, the least any valid vector can cost, so it exists
+whenever anything does.
 
-1. **Prefer a balloon when the creditor allows one.** Load-bearing: case 3 has
-   `program_fee_pct: 0.0`, so every candidate ties at zero and the objective alone
-   can't choose.
-2. **Fewer payments** -- each carries a bank fee. A preference we chose, not a spec
-   constraint. Decides case 4: k=10 and k=12 reach the same fee vector, and k=10 saves
-   the client $10 in bank fees.
-3. **Smaller payments earliest**, for determinism.
+`pay_shape_used` comes from the winning vector, not the flags: one level -> `even`,
+balloon builder -> `balloon`, else `staircase`.
 
-### Fee placement: two passes, not a greedy
+## 4. Enumerating staircases
 
-A forward greedy -- sweep whatever's left into the fee at each date -- is **incorrect**.
-Fee taken at date `t` lowers the balance at every date after `t`, so a locally maximal
-grab can starve a later payment. Instead:
+Every way to cut `k` positions into `s` contiguous runs, `s` in `1..max_segments`. Each
+run sits at the lowest values its floors allow; the remainder lands on the **final**
+run, keeping early payments as small as the rules permit. `s = 1` is the flat vector, so
+both ends of the spectrum compete and the objective picks the step placement.
 
-1. Simulate with payments and bank fees but **no fee**; record the balance after every
-   date. Any negative -> this candidate is unaffordable regardless of fee placement.
-2. Take **suffix minima over all dates**, not just cadence dates -- a fixed ledger
-   debit between two cadence dates constrains how much we may pull early (case 3's
-   -$150 on Feb 1).
+**One fill per cut set suffices.** All valid vectors sum to `offer_total`, so the final
+balance is identical across them; only earlier dates differ, and they improve as the
+running total spent falls. The cheapest fill minimises every prefix sum for its cut set.
+
+**Every cut set is kept**, because across them no single vector is cheapest. An earlier
+cut lets position 1 sit on its own low floor but leaves a bigger tail; a later cut drags
+early positions up to `top - 1` and leaves a smaller one. Floors `[200, 900, 900, 900]`,
+total 4000:
+
+```
+[200, 1266, 1267, 1267]   prefix sums  200, 1466, 2733
+[899,  900,  900, 1301]   prefix sums  899, 1799, 2699
+```
+
+Neither is pointwise below the other, and each wins for some ledger. A **one-cent
+difference inside a run** does not open a new segment -- the waiver S5.7 grants `even`,
+extended to staircase runs. Cut sets are the powerset of the gaps, so this runs as a
+memoised DFS -- see Complexity.
+
+## 5. Placing the fee: two passes, not a greedy
+
+A forward greedy -- sweep what is left into the fee at each date -- is **incorrect**:
+fee taken at `t` lowers the balance at every later date, so a locally maximal grab can
+starve a later payment. Instead:
+
+1. Simulate with payments and bank fees but **no fee**, recording the balance after
+   every date. Any negative and the candidate is unaffordable however the fee is placed.
+2. Take **suffix minima over all dates**, not just cadence dates -- a fixed ledger debit
+   between two cadence dates limits how much we may pull early (case 3's -$150 on Feb 1).
 3. At each cadence date take `min(remaining fee, suffix_min[d] - fee already taken)`.
 
-Step 3 is the lexicographic maximum, and if it can't finish the fee by the horizon then
-no allocation can. S5.6(a) holds by construction: the walk starts at cadence index 0,
+Step 3 is the lexicographic maximum; if it cannot finish the fee by the horizon, no
+allocation can. S5.6(a) holds by construction -- the walk starts at cadence index 0,
 which *is* `first_payment_date`.
 
-On case 4's Jun 30 row the balance is $420 but the suffix minimum is $350, held down by
-Oct 31 four months later. A greedy would read $420 and overdraw. `tools/trace.py`
-prints both columns.
+Case 4's Jun 30 row: balance $420, suffix minimum $350, held down by Oct 31 four months
+later. A greedy would read $420 and overdraw.
 
-### Part 2: minimum additional funds
+## 6. Ranking
 
-Binary search over cents against a short-circuiting `is_feasible()` oracle. Bisection
-is valid because feasibility is **monotone** in extra money, which rests on two facts:
-the only cash rule is `balance >= 0` (no cap, no "must end at zero" -- case 1 finishes
-with $340 idle), and the candidate set doesn't depend on cash, so money can't unlock a
-cheaper *shape*. The ceiling is every possible outflow plus every fixed debit; if even
-that fails we report un-fundable.
+**Lexicographic maximum of the cumulative fee by cadence date 1, then 2, then 3...**
+All candidates produce equal-length vectors, so they compare element-wise, and the shape
+is an outcome of this rather than hard-coded. Ties break by:
 
-**Lump placement** is `as_of_date + 1`, the earliest modifiable date. This is weakly
-optimal: for a lump `L` on date `d`, the balance at `x` is
-`base(x) - outflows(x) + L * [d <= x]`; moving it earlier flips that indicator on
-sooner and never off, so the balance is weakly higher everywhere and any `L` that
-worked still works. So `minL(date)` is non-decreasing. A seeded property test enforces
-it -- *if `L` is minimal at the earliest date, `L - 1` must fail at every later date.*
+1. **Prefer a balloon where allowed.** Load-bearing: case 3 has `program_fee_pct: 0.0`,
+   so every candidate ties at zero and the objective alone cannot choose.
+2. **Fewer payments** -- each carries a bank fee. Our preference, not a spec constraint.
+   Decides case 4: k=10 and k=12 tie on fee, and k=10 saves the client $10.
+3. **Smaller payments earliest**, for determinism.
 
-A whole range of dates ties at the minimum (Jan 1 through Apr 30 in case 2); we report
-the earliest. See assumption 7.
+## 7. Part 2: minimum additional funds
+
+Binary search over cents against a short-circuiting feasibility oracle. Bisection is
+valid because feasibility is **monotone** in extra money, resting on two facts: the only
+cash rule is `balance >= 0` (no cap, no "must end at zero" -- case 1 finishes with $340
+idle), and the candidate set does not depend on cash, so money cannot unlock a cheaper
+*shape*. The ceiling is every possible outflow plus every fixed debit; if that fails we
+report un-fundable.
+
+**Lump sum** goes on `as_of_date + 1`, the earliest modifiable date, which is weakly
+optimal: for a lump `L` on `d` the balance at `x` is `base(x) - outflows(x) + L*[d <= x]`,
+so moving it earlier flips that indicator on sooner and never off -- the balance is
+weakly higher everywhere and any `L` that worked still works. Hence `minL(date)` is
+non-decreasing. A property test enforces it: *if `L` is minimal at the earliest date,
+`L - 1` must fail at every later date.* A whole range of dates ties at that minimum
+(Jan 1 through Apr 30 in case 2); we report the earliest (assumption 7).
 
 **Monthly increment** goes on every ledger credit after `as_of_date` (S3: the credits
-*are* the drafts). `num_drafts` counts every draft **affected**, including ones that
-arrive too late to help -- case 2 reports 5 while only 4 do work, which is why the two
-minima imply different totals ($100 vs $125), as S8 predicts.
+*are* the drafts). `num_drafts` counts every draft **affected**, including ones arriving
+too late to help -- case 2 reports 5 while only 4 do work, which is why the two minima
+imply different totals ($100 vs $125), as S8 predicts.
 
 ---
 
 # Complexity
 
-Let **D** = cadence dates at or before the horizon, **M** = distinct dates in the
-simulation, **K** = `min(max_payments, max_terms, D)`, **S** = `max_segments`.
+**D** = cadence dates at or before the horizon, **M** = distinct dates simulated,
+**K** = `min(max_payments, max_terms, D)`, **S** = `max_segments`.
 
 | stage | cost |
 |---|---|
-| candidate enumeration | `S(s=1..S) C(k-1, s-1)` summed over k -- see below |
-| `simulate()` per candidate | O(M), with the dated view built once per search |
-| Part 2 | x O(log ceiling) probes, ~17 per search |
+| candidate enumeration | see below |
+| `simulate()` per candidate | O(M); the dated view is built once per search |
+| Part 2 | x ~17 bisection probes per search |
 
-**Why the enumeration is exponential in the naive form.** Cutting `k` ordered
-positions into `s` contiguous runs means choosing `s - 1` cut points from the
-`k - 1` gaps, i.e. `C(k-1, s-1)`. Summing over `s` up to `S`:
+**Why the naive enumeration is exponential.** Cutting `k` positions into `s` contiguous
+runs means choosing `s - 1` cut points from the `k - 1` gaps, i.e. `C(k-1, s-1)`:
 
 ```
 S >= k    ->  sum(j=0..k-1) C(k-1, j) = 2^(k-1)     the powerset of the gaps
 S small   ->  O(k^(S-1))                            polynomial
 ```
 
-`max_segments >= max_payments` just means "no segment limit", which a creditor may
-well send, and it walks the whole powerset -- 2^22 ~ 4.2M cut sets at k=23, yielding
-the same 850 valid vectors that `S = 3` does.
+`max_segments >= max_payments` just means "no segment limit", which a creditor may well
+send, and it walks the whole powerset -- 2^22 ~ 4.2M cut sets at k=23, yielding the same
+850 valid vectors that `S = 3` does.
 
-**Why not a scoring DP.** The obvious fix is a DP over positions, but our objective
-is not prefix-separable: the fee at a date depends on the suffix minimum of the whole
-balance trajectory, so a partial vector cannot be scored and reduced to one best value
-per state. A DP over `(position, segments, cents allocated)` would work but
-reintroduces the cents dimension we rejected for the payment vector in the first place.
+**Why not a scoring DP.** Our objective is not prefix-separable: the fee at a date
+depends on the suffix minimum of the whole balance trajectory, so a partial vector
+cannot be reduced to one best value per state. A DP over `(position, segments, cents
+allocated)` would work but reintroduces the cents dimension we rejected for the payment
+vector in the first place.
 
 **What we do instead** is the other half of DP -- memoised DFS over shared prefixes,
-which is exactly where the redundancy lives (4.2M cut sets collapsing to 850 vectors):
+which is where the redundancy actually lives:
 
-- **Prune** on two *necessary* conditions before a vector is built: the positions
-  still to be covered cannot cost less than their own floors, and the final run's
-  spread cannot start below the run before it.
-- **Memoise** on `(position, head)`, keeping the fewest runs each state was reached
-  with -- arriving with runs to spare is strictly better, since it leaves more cuts
-  available downstream.
+- **Prune** on two *necessary* conditions before building a vector: the positions still
+  to cover cannot cost less than their own floors, and the final run's spread cannot
+  start below the run before it.
+- **Memoise** on `(position, head)`, keeping the fewest runs the state was reached with
+  -- arriving with runs to spare leaves more cuts available downstream.
 
 Both are lossless; the candidate set is identical, which
-`test_solver_matches_exhaustive_search_on_small_cases` checks.
-
-Two smaller wins: the dated ledger view is built once per search rather than per
-candidate, and Part 2 enumerates candidates once rather than once per bisection probe
-(~32 across the two searches -- the candidates never depend on the money).
+`test_solver_matches_exhaustive_search_on_small_cases` checks. Two smaller wins: the
+dated ledger view is built once per search rather than per candidate, and Part 2
+enumerates candidates once rather than once per probe (~32 across the two searches).
 
 ```
 months   S   before ms   after ms   speedup
-    12   3         4.4        2.8         2x
     36   3       144.4       66.4         2x
     36   4       657.6       81.4         8x
     24  24    115785.9       97.5      1187x
 ```
 
-The provided cases are unaffected -- all four still evaluate in single-digit ms. The
-last row is the one that mattered: a legal rules set that took two minutes now takes
-a tenth of a second.
+The provided cases are unaffected -- all four still evaluate in single-digit ms.
 
 ---
 
