@@ -18,6 +18,7 @@ the last usable cadence date buys nothing.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Callable
 
 from feasibility.models import Client, CreditorRules, Offer, offer_total_cents, program_fee_cents
 from feasibility.money import pct_of_cents
@@ -30,8 +31,11 @@ INCREMENT_FLOOR_CENTS = 10000  # X may always reach $100 regardless of draft siz
 INCREMENT_PCT_OF_DRAFT = 0.40
 LUMP_PCT_OF_OFFER = 0.65
 
+# Called with (lo, hi, probe, feasible) at each bisection step. See tools/trace.py.
+Probe = Callable[[int, int, int, bool], None]
 
-def _search_ceiling(client: Client, offer: Offer, rules: CreditorRules) -> int:
+
+def search_ceiling(client: Client, offer: Offer, rules: CreditorRules) -> int:
     """An amount certainly large enough, if anything is.
 
     Everything we could ever debit (the settlement, our fee, every bank fee)
@@ -54,14 +58,23 @@ def _search_ceiling(client: Client, offer: Offer, rules: CreditorRules) -> int:
     )
 
 
-def _bisect(predicate, hi: int) -> int | None:
-    """Smallest v in [1, hi] with predicate(v), or None if even hi fails."""
-    if not predicate(hi):
+def bisect(predicate, hi: int, on_probe: Probe | None = None) -> int | None:
+    """Smallest v in [1, hi] with predicate(v), or None if even hi fails.
+
+    ``on_probe`` observes each step for tooling; it cannot change the answer.
+    """
+    ok = predicate(hi)
+    if on_probe is not None:
+        on_probe(1, hi, hi, ok)
+    if not ok:
         return None
     lo = 1
     while lo < hi:
         mid = (lo + hi) // 2
-        if predicate(mid):
+        ok = predicate(mid)
+        if on_probe is not None:
+            on_probe(lo, hi, mid, ok)
+        if ok:
             hi = mid
         else:
             lo = mid + 1
@@ -79,7 +92,9 @@ def future_draft_dates(client: Client) -> list[date]:
     ]
 
 
-def minimum_lump_sum(client: Client, offer: Offer, rules: CreditorRules) -> FundsOption:
+def minimum_lump_sum(
+    client: Client, offer: Offer, rules: CreditorRules, on_probe: Probe | None = None
+) -> FundsOption:
     """Smallest single extra credit that makes some valid schedule fit.
 
     Placed on the earliest date we are allowed to touch (the day after
@@ -95,9 +110,10 @@ def minimum_lump_sum(client: Client, offer: Offer, rules: CreditorRules) -> Fund
             date=None,
         )
 
-    amount = _bisect(
+    amount = bisect(
         lambda v: is_feasible(client, offer, rules, [(when, v)]),
-        _search_ceiling(client, offer, rules),
+        search_ceiling(client, offer, rules),
+        on_probe,
     )
     if amount is None:
         return FundsOption(
@@ -114,7 +130,7 @@ def minimum_lump_sum(client: Client, offer: Offer, rules: CreditorRules) -> Fund
 
 
 def minimum_monthly_increment(
-    client: Client, offer: Offer, rules: CreditorRules
+    client: Client, offer: Offer, rules: CreditorRules, on_probe: Probe | None = None
 ) -> FundsOption:
     """Smallest uniform amount added to every future draft that makes it fit."""
     dates = future_draft_dates(client)
@@ -127,9 +143,10 @@ def minimum_monthly_increment(
             num_drafts=0,
         )
 
-    amount = _bisect(
+    amount = bisect(
         lambda v: is_feasible(client, offer, rules, [(d, v) for d in dates]),
-        _search_ceiling(client, offer, rules),
+        search_ceiling(client, offer, rules),
+        on_probe,
     )
     if amount is None:
         # Every remaining draft can land after the last usable cadence date.

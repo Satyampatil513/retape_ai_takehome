@@ -2,7 +2,7 @@
 
     python tools/trace.py cases/case4_tiers
     python tools/trace.py cases/case4_tiers --k 10      # fee pass for a given k
-    python tools/trace.py cases/case2_infeasible_minima
+    python tools/trace.py cases/case2_infeasible_minima   # + the funding bisection
 
 Read-only: it drives the same public functions the engine does and prints what
 they return. Nothing here affects the answer.
@@ -20,6 +20,12 @@ from feasibility.models import (  # noqa: E402
     load_case,
     offer_total_cents,
     program_fee_cents,
+)
+from feasibility.funding import (  # noqa: E402
+    future_draft_dates,
+    minimum_lump_sum,
+    minimum_monthly_increment,
+    search_ceiling,
 )
 from feasibility.shapes import cadence_dates, floor_at  # noqa: E402
 from feasibility.simulate import simulate  # noqa: E402
@@ -138,6 +144,42 @@ def show_fee_pass(client, offer, rules, cadence, fee_total, payments, shape) -> 
         print("  cap = sufxmin - fee already taken; the fee column is min(remaining, cap).")
 
 
+def show_funding(client, offer, rules, structurally_possible) -> None:
+    print()
+    print("-- part 2: minimum additional funds --------------------------------")
+    if not structurally_possible:
+        print("  the creditor rules admit no valid payment vector at any k;")
+        print("  no amount of money helps, so neither search is run.")
+        return
+
+    print(f"  search ceiling   {search_ceiling(client, offer, rules)}")
+    print(f"  future drafts    {len(future_draft_dates(client))}")
+
+    for name, run in (
+        ("lump sum", minimum_lump_sum),
+        ("monthly increment", minimum_monthly_increment),
+    ):
+        steps: list[tuple[int, int, int, bool]] = []
+        option = run(client, offer, rules, lambda *a: steps.append(a))
+        print()
+        print(f"  {name}:")
+        print("    step        lo           hi        probe   feasible   window")
+        for i, (lo, hi, probe, ok) in enumerate(steps):
+            tag = "  (ceiling)" if i == 0 else ""
+            width = hi - lo + 1
+            print(
+                f"    {i:>4}  {lo:>9}  {hi:>11}  {probe:>11}   "
+                f"{'yes' if ok else 'no':<8}  {width:>9}{tag}"
+            )
+        if option.amount_cents or option.within_guardrail:
+            extra = f"on {option.date}" if option.date else f"across {option.num_drafts} drafts"
+            print(f"    -> {option.amount_cents} {extra}")
+        print(
+            f"    guardrail: within={option.within_guardrail}"
+            + (f"  ({option.reason})" if option.reason else "")
+        )
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: python tools/trace.py <case_dir> [--k N]", file=sys.stderr)
@@ -159,6 +201,9 @@ def main(argv: list[str]) -> int:
     best_k = show_candidates(client, offer, rules, cadence, fee_total)
 
     outcome = solve(client, offer, rules)
+    if outcome.solution is None and want_k is None:
+        show_funding(client, offer, rules, outcome.structurally_possible)
+        return 0
     k = want_k if want_k is not None else best_k
     if k is None:
         return 0
