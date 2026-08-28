@@ -28,12 +28,29 @@ from feasibility.results import ScheduleRow
 
 
 @dataclass(frozen=True)
+class Trace:
+    """Intermediate state of a run, for inspection. See tools/trace.py."""
+
+    dates: list[date]
+    credits: dict[date, int]
+    debits: dict[date, int]
+    # Running balance with payments and bank fees but no program fee (pass A).
+    balances: dict[date, int]
+    # min(balances[d'] for d' >= d) -- the ceiling on fee pulled at d (pass B).
+    suffix_min: dict[date, int]
+    fee_on: dict[date, int]
+    reason: str  # empty when the run succeeded
+
+
+@dataclass(frozen=True)
 class Sim:
     ok: bool
     rows: list[ScheduleRow]
     # Cumulative fee collected as of each cadence date. Always one entry per
     # cadence date, so vectors from different candidates compare element-wise.
     cum_fee: tuple[int, ...]
+    # Populated only when simulate(..., trace=True); None on the hot path.
+    trace: Trace | None = None
 
 
 INFEASIBLE = Sim(False, [], ())
@@ -68,8 +85,14 @@ def simulate(
     rules: CreditorRules,
     fee_total: int,
     extra_credits: Iterable[tuple[date, int]] = (),
+    trace: bool = False,
 ) -> Sim:
-    """Simulate one candidate payment vector and place the fee optimally."""
+    """Simulate one candidate payment vector and place the fee optimally.
+
+    ``trace=True`` attaches the intermediate pass-A balances, suffix minima and
+    fee placement to the result, for tools/trace.py. It changes nothing about
+    the answer.
+    """
     credits, debits = future_entries(client, extra_credits)
     pay_on = {cadence[i]: payments[i] for i in range(len(payments))}
     all_dates = sorted(set(credits) | set(debits) | set(cadence))
@@ -84,7 +107,11 @@ def simulate(
         if pay_on.get(d, 0):
             balance -= pay_on[d] + rules.bank_fee_cents
         if balance < 0:
-            return INFEASIBLE
+            balances[d] = balance
+            return _fail(
+                f"balance {balance} < 0 on {d}",
+                trace, all_dates, credits, debits, balances, {}, {},
+            )
         balances[d] = balance
 
     # Suffix minima over *all* dates, not just cadence dates: a fixed ledger
@@ -109,7 +136,11 @@ def simulate(
         remaining -= amount
         cum_fee.append(taken)
     if remaining > 0:
-        return INFEASIBLE  # fee not fully collected by the horizon (S5.6b)
+        # fee not fully collected by the horizon (S5.6b)
+        return _fail(
+            f"{remaining} of the {fee_total} program fee is still uncollected at the horizon",
+            trace, all_dates, credits, debits, balances, suffix_min, fee_on,
+        )
 
     rows: list[ScheduleRow] = []
     taken = 0
@@ -129,4 +160,20 @@ def simulate(
                 balance_cents=balances[d] - taken,
             )
         )
-    return Sim(True, rows, tuple(cum_fee))
+    detail = (
+        Trace(all_dates, dict(credits), dict(debits), balances, suffix_min, fee_on, "")
+        if trace
+        else None
+    )
+    return Sim(True, rows, tuple(cum_fee), detail)
+
+
+def _fail(reason, trace, dates, credits, debits, balances, suffix_min, fee_on) -> Sim:
+    if not trace:
+        return INFEASIBLE
+    return Sim(
+        False,
+        [],
+        (),
+        Trace(dates, dict(credits), dict(debits), balances, suffix_min, fee_on, reason),
+    )
