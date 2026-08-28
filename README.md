@@ -169,9 +169,14 @@ minima imply different totals ($100 vs $125), as S8 predicts.
 
 # Alternatives considered
 
-- **DP over (date, fee collected)** -- correct, but adds a state dimension of size
-  `program_fee_cents` for something the suffix-minimum argument solves exactly in one
-  linear pass.
+- **DP to build the payment vector** -- states of (position, cents allocated so far,
+  segments used), transitioning on each payment's amount. Correct, but the state space
+  is dominated by the cents dimension (`offer_total` runs to hundreds of thousands)
+  while the thing we actually need -- every legal vector -- is only a few dozen per `k`
+  at the segment caps these creditors set. Straight enumeration is smaller, faster and
+  much easier to read. DP would start to pay off only at a far larger `k` or
+  `max_segments`, which is the same boundary noted under limitations.
+  (The *fee* needs no search at all -- see the two-pass argument above.)
 - **Integer / MILP over the whole problem** -- would handle every constraint uniformly
   and need no shape reasoning, but adds a solver dependency, makes "why this schedule?"
   opaque, and needs a fiddly lexicographic-objective encoding. Overkill at this size.
