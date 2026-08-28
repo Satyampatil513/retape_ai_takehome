@@ -14,6 +14,8 @@ from datetime import date
 from pathlib import Path
 from typing import Literal
 
+from feasibility.money import pct_of_cents
+
 EntryType = Literal["credit", "debit"]
 
 
@@ -38,7 +40,10 @@ class Client:
 @dataclass
 class Offer:
     creditor: str
-    current_balance_cents: int
+    # ASSIGNMENT.md S4 renamed this from ``current_balance_cents`` (which
+    # collided with the client's SDA balance). The shipped case JSONs still use
+    # the old key, so the loader accepts either spelling.
+    creditor_balance_cents: int
     original_balance_cents: int
     settlement_pct: float
     # Optional. When omitted, default to the end of the month of first_draft_date
@@ -137,9 +142,12 @@ def load_client(path: str | Path) -> Client:
 def load_offer(path: str | Path) -> Offer:
     raw = json.loads(Path(path).read_text())
     fpd = raw.get("first_payment_date")
+    balance = raw.get("creditor_balance_cents", raw.get("current_balance_cents"))
+    if balance is None:
+        raise KeyError("offer needs creditor_balance_cents (or legacy current_balance_cents)")
     return Offer(
         creditor=raw["creditor"],
-        current_balance_cents=int(raw["current_balance_cents"]),
+        creditor_balance_cents=int(balance),
         original_balance_cents=int(raw["original_balance_cents"]),
         settlement_pct=float(raw["settlement_pct"]),
         first_payment_date=_d(fpd) if fpd else None,
@@ -172,8 +180,10 @@ def load_case(case_dir: str | Path) -> tuple[Client, Offer, CreditorRules]:
 
 
 def offer_total_cents(offer: Offer) -> int:
-    return round(offer.settlement_pct * offer.current_balance_cents)
+    """What we must pay the creditor, in cents (half-up per S3)."""
+    return pct_of_cents(offer.settlement_pct, offer.creditor_balance_cents)
 
 
 def program_fee_cents(offer: Offer, rules: CreditorRules) -> int:
-    return round(rules.program_fee_pct * offer.original_balance_cents)
+    """Our total program fee, in cents (half-up per S3)."""
+    return pct_of_cents(rules.program_fee_pct, offer.original_balance_cents)
