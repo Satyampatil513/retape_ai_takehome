@@ -21,7 +21,7 @@ from feasibility.shapes import (
     segment_count,
     staircase_vectors,
 )
-from feasibility.simulate import simulate
+from feasibility.simulate import build_timeline, simulate
 
 
 @dataclass(frozen=True)
@@ -96,14 +96,14 @@ def solve(
         return Outcome(None, False)
 
     fee_total = program_fee_cents(offer, rules)
-    extra = list(extra_credits)
+    timeline = build_timeline(client, cadence, extra_credits)
 
     structurally_possible = False
     best: Solution | None = None
     best_key = None
     for cand in candidates(cadence, offer, rules):
         structurally_possible = True
-        sim = simulate(client, cadence, cand.payments, rules, fee_total, extra)
+        sim = simulate(client, cadence, cand.payments, rules, fee_total, timeline=timeline)
         if not sim.ok:
             continue
         key = (
@@ -119,23 +119,40 @@ def solve(
     return Outcome(best, structurally_possible)
 
 
+def feasibility_oracle(client: Client, offer: Offer, rules: CreditorRules):
+    """Build a reusable ``probe(extra_credits) -> bool``.
+
+    The candidate vectors come from the creditor rules alone, so they do not
+    change as the funding search varies the money. Enumerating them once and
+    reusing them across every probe is the difference between one enumeration
+    and one per bisection step (roughly 32 of them across the two searches).
+
+    The probe short-circuits on the first affordable candidate: the funding
+    search only needs a yes/no, not the best schedule.
+    """
+    cadence = cadence_dates(client, offer)
+    fee_total = program_fee_cents(offer, rules)
+    vectors = [c.payments for c in candidates(cadence, offer, rules)] if cadence else []
+
+    def probe(extra_credits: Iterable[tuple[date, int]] = ()) -> bool:
+        if not vectors:
+            return False
+        timeline = build_timeline(client, cadence, extra_credits)
+        for payments in vectors:
+            if simulate(
+                client, cadence, payments, rules, fee_total, timeline=timeline
+            ).ok:
+                return True
+        return False
+
+    return probe
+
+
 def is_feasible(
     client: Client,
     offer: Offer,
     rules: CreditorRules,
     extra_credits: Iterable[tuple[date, int]] = (),
 ) -> bool:
-    """Does *any* valid schedule fit? Short-circuits on the first one.
-
-    The funding search only needs a yes/no, not the best schedule, so this
-    skips the ranking that solve() does.
-    """
-    cadence = cadence_dates(client, offer)
-    if not cadence:
-        return False
-    fee_total = program_fee_cents(offer, rules)
-    extra = list(extra_credits)
-    for cand in candidates(cadence, offer, rules):
-        if simulate(client, cadence, cand.payments, rules, fee_total, extra).ok:
-            return True
-    return False
+    """Does *any* valid schedule fit? One-shot form of feasibility_oracle."""
+    return feasibility_oracle(client, offer, rules)(extra_credits)

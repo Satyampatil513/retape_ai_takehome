@@ -24,7 +24,7 @@ from feasibility.models import Client, CreditorRules, Offer, offer_total_cents, 
 from feasibility.money import pct_of_cents
 from feasibility.results import AdditionalFunds, FundsOption
 from feasibility.shapes import cadence_dates
-from feasibility.solver import is_feasible
+from feasibility.solver import feasibility_oracle
 
 # S8 guardrails.
 INCREMENT_FLOOR_CENTS = 10000  # X may always reach $100 regardless of draft size
@@ -110,8 +110,9 @@ def minimum_lump_sum(
             date=None,
         )
 
+    fits = feasibility_oracle(client, offer, rules)
     amount = bisect(
-        lambda v: is_feasible(client, offer, rules, [(when, v)]),
+        lambda v: fits([(when, v)]),
         search_ceiling(client, offer, rules),
         on_probe,
     )
@@ -143,8 +144,9 @@ def minimum_monthly_increment(
             num_drafts=0,
         )
 
+    fits = feasibility_oracle(client, offer, rules)
     amount = bisect(
-        lambda v: is_feasible(client, offer, rules, [(d, v) for d in dates]),
+        lambda v: fits([(d, v) for d in dates]),
         search_ceiling(client, offer, rules),
         on_probe,
     )

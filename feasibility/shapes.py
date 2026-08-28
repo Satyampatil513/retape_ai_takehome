@@ -140,9 +140,9 @@ def balloon_vector(k: int, total: int, rules: CreditorRules) -> list[int] | None
 def staircase_vectors(k: int, total: int, rules: CreditorRules) -> Iterator[list[int]]:
     """Every legal staircase over ``k`` payments, up to ``max_segments`` levels.
 
-    Rather than hand-place the steps, we enumerate every way to cut ``k``
+    Rather than hand-place the steps, we consider every way to cut ``k``
     positions into ``s`` contiguous runs and let the objective pick. Each run
-    sits at the lowest level its floors allow; whatever is left over lands on
+    sits at the lowest values its floors allow; whatever is left over lands on
     the final run, which keeps the early payments as small as the rules permit.
 
     ``s = 1`` reproduces the flat/even vector, so the flattest and the most
@@ -155,50 +155,71 @@ def staircase_vectors(k: int, total: int, rules: CreditorRules) -> Iterator[list
     prefix sum for its cut set, so it dominates every other fill of that cut set
     on both feasibility and fee capacity. Verified against exhaustive
     enumeration in tests/test_engine.py.
+
+    Enumerated as a memoised DFS rather than ``combinations``. Choosing cut
+    points is choosing a subset of the k-1 gaps, so a plain enumeration is
+    O(2^k) once ``max_segments >= k``. Two things tame it, and neither changes
+    the set of vectors produced:
+
+      * **Pruning.** Two exact necessary conditions kill a branch before its
+        vector is built -- the positions still to be covered cannot cost less
+        than their own floors, and the final run's spread cannot start below the
+        run before it.
+      * **Memoisation.** Different cut prefixes often produce identical head
+        values, and from there the remaining work is identical, so each
+        (position, head) pair is expanded once.
     """
     if k <= 0:
         return
-    seen: set[tuple[int, ...]] = set()
-    for s in range(1, min(max(rules.max_segments, 1), k) + 1):
-        for cuts in combinations(range(1, k), s - 1):
-            bounds = (0,) + cuts + (k,)
-            runs = [(bounds[j], bounds[j + 1]) for j in range(s)]
 
-            # Each leading run takes the cheapest values it can. A run is one
-            # level, but the +/-1 waiver lets it hold two adjacent values, so the
-            # floor is per position rather than a flat max: with floors [3, 4]
-            # the run is [3, 4], not [4, 4]. Only the position carrying the
-            # run's highest floor has to reach it; the rest need only stay
-            # within a cent of it, and nothing may dip below the previous run.
-            head: list[int] = []
-            prev = 0
-            for a, b in runs[:-1]:
-                floors = [floor_at(i + 1, rules) for i in range(a, b)]
-                top = max(floors)
-                values = [max(f, top - 1, prev) for f in floors]
-                head.extend(values)
-                prev = values[-1]
+    floors = [floor_at(i + 1, rules) for i in range(k)]
+    # floors_from[i] = the least the positions from i onward can possibly cost.
+    floors_from = [0] * (k + 1)
+    for i in range(k - 1, -1, -1):
+        floors_from[i] = floors_from[i + 1] + floors[i]
 
-            a, b = runs[-1]
-            rest = total - sum(head)
-            if rest < 0:
-                continue
-            # Do NOT pre-reject on the run's maximum floor here. The spread puts
-            # the +1 cents on the run's latest positions, which is exactly where
-            # a tier step-up sits, so a run whose base is below its own maximum
-            # floor can still clear every positional floor -- e.g. floors
-            # [2, 3, 5] with total 13 admits [4, 4, 5]. validate() checks the
-            # floors position by position, which is the real requirement.
+    max_runs = min(max(rules.max_segments, 1), k)
+    emitted: set[tuple[int, ...]] = set()
+    # (position, head) -> the fewest runs we have reached that state with. Reaching
+    # the same head with fewer runs spent is strictly better, since it leaves more
+    # cuts available downstream, so only a cheaper arrival is worth re-expanding.
+    expanded: dict[tuple[int, tuple[int, ...]], int] = {}
 
-            v = head + _spread(rest, b - a)
+    def walk(start: int, head: list[int], head_sum: int, prev: int, runs_used: int):
+        state = (start, tuple(head))
+        seen_runs = expanded.get(state)
+        if seen_runs is not None and seen_runs <= runs_used:
+            return
+        expanded[state] = runs_used
 
-            if REQUIRE_NON_BALLOON_TAIL and not rules.is_ballooning_allowed:
-                if k >= 2 and last_segment_len(v) < 2:
-                    continue
+        # Close here: positions [start, k) become the absorbing final run.
+        length = k - start
+        rest = total - head_sum
+        # Necessary: the run must cover its own floors, and its spread starts at
+        # rest // length, which may not dip below the previous run.
+        if rest >= floors_from[start] and rest >= prev * length:
+            v = head + _spread(rest, length)
+            if not (
+                REQUIRE_NON_BALLOON_TAIL
+                and not rules.is_ballooning_allowed
+                and k >= 2
+                and last_segment_len(v) < 2
+            ):
+                key = tuple(v)
+                if key not in emitted and validate(v, total, rules, check_segments=True):
+                    emitted.add(key)
+                    yield v
 
-            key = tuple(v)
-            if key in seen:
-                continue
-            seen.add(key)
-            if validate(v, total, rules, check_segments=True):
-                yield v
+        # Or extend: [start, cut) becomes one more leading run.
+        if runs_used + 1 >= max_runs:
+            return
+        for cut in range(start + 1, k):
+            top = max(floors[start:cut])
+            values = [max(f, top - 1, prev) for f in floors[start:cut]]
+            run_sum = sum(values)
+            # Nothing after this run can cost less than its own floors.
+            if head_sum + run_sum + floors_from[cut] > total:
+                break  # runs only get longer and dearer as `cut` grows
+            yield from walk(cut, head + values, head_sum + run_sum, values[-1], runs_used + 1)
+
+    yield from walk(0, [], 0, 0, 0)

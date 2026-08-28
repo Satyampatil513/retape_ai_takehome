@@ -28,6 +28,20 @@ from feasibility.results import ScheduleRow
 
 
 @dataclass(frozen=True)
+class Timeline:
+    """The dated activity a candidate is simulated against.
+
+    Independent of the payment vector, so it is built once per (client,
+    extra_credits) and reused across every candidate rather than rebuilt and
+    re-sorted on each call.
+    """
+
+    credits: dict[date, int]
+    debits: dict[date, int]
+    dates: list[date]
+
+
+@dataclass(frozen=True)
 class Trace:
     """Intermediate state of a run, for inspection. See tools/trace.py."""
 
@@ -78,6 +92,16 @@ def future_entries(
     return credits, debits
 
 
+def build_timeline(
+    client: Client,
+    cadence: Sequence[date],
+    extra_credits: Iterable[tuple[date, int]] = (),
+) -> Timeline:
+    """Aggregate the future ledger and the cadence into one dated view."""
+    credits, debits = future_entries(client, extra_credits)
+    return Timeline(credits, debits, sorted(set(credits) | set(debits) | set(cadence)))
+
+
 def simulate(
     client: Client,
     cadence: Sequence[date],
@@ -86,16 +110,21 @@ def simulate(
     fee_total: int,
     extra_credits: Iterable[tuple[date, int]] = (),
     trace: bool = False,
+    timeline: Timeline | None = None,
 ) -> Sim:
     """Simulate one candidate payment vector and place the fee optimally.
 
     ``trace=True`` attaches the intermediate pass-A balances, suffix minima and
     fee placement to the result, for tools/trace.py. It changes nothing about
     the answer.
+
+    Pass ``timeline`` to reuse a prebuilt Timeline across candidates. It already
+    carries ``extra_credits``, which is then ignored.
     """
-    credits, debits = future_entries(client, extra_credits)
+    if timeline is None:
+        timeline = build_timeline(client, cadence, extra_credits)
+    credits, debits, all_dates = timeline.credits, timeline.debits, timeline.dates
     pay_on = {cadence[i]: payments[i] for i in range(len(payments))}
-    all_dates = sorted(set(credits) | set(debits) | set(cadence))
 
     # Pass A -- no fee. Credits before debits on each date (S3); the balance is
     # checked once per date, after everything that day has landed.

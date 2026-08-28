@@ -167,6 +167,67 @@ minima imply different totals ($100 vs $125), as S8 predicts.
 
 ---
 
+# Complexity
+
+Let **D** = cadence dates at or before the horizon, **M** = distinct dates in the
+simulation, **K** = `min(max_payments, max_terms, D)`, **S** = `max_segments`.
+
+| stage | cost |
+|---|---|
+| candidate enumeration | `S(s=1..S) C(k-1, s-1)` summed over k -- see below |
+| `simulate()` per candidate | O(M), with the dated view built once per search |
+| Part 2 | x O(log ceiling) probes, ~17 per search |
+
+**Why the enumeration is exponential in the naive form.** Cutting `k` ordered
+positions into `s` contiguous runs means choosing `s - 1` cut points from the
+`k - 1` gaps, i.e. `C(k-1, s-1)`. Summing over `s` up to `S`:
+
+```
+S >= k    ->  sum(j=0..k-1) C(k-1, j) = 2^(k-1)     the powerset of the gaps
+S small   ->  O(k^(S-1))                            polynomial
+```
+
+`max_segments >= max_payments` just means "no segment limit", which a creditor may
+well send, and it walks the whole powerset -- 2^22 ~ 4.2M cut sets at k=23, yielding
+the same 850 valid vectors that `S = 3` does.
+
+**Why not a scoring DP.** The obvious fix is a DP over positions, but our objective
+is not prefix-separable: the fee at a date depends on the suffix minimum of the whole
+balance trajectory, so a partial vector cannot be scored and reduced to one best value
+per state. A DP over `(position, segments, cents allocated)` would work but
+reintroduces the cents dimension we rejected for the payment vector in the first place.
+
+**What we do instead** is the other half of DP -- memoised DFS over shared prefixes,
+which is exactly where the redundancy lives (4.2M cut sets collapsing to 850 vectors):
+
+- **Prune** on two *necessary* conditions before a vector is built: the positions
+  still to be covered cannot cost less than their own floors, and the final run's
+  spread cannot start below the run before it.
+- **Memoise** on `(position, head)`, keeping the fewest runs each state was reached
+  with -- arriving with runs to spare is strictly better, since it leaves more cuts
+  available downstream.
+
+Both are lossless; the candidate set is identical, which
+`test_solver_matches_exhaustive_search_on_small_cases` checks.
+
+Two smaller wins: the dated ledger view is built once per search rather than per
+candidate, and Part 2 enumerates candidates once rather than once per bisection probe
+(~32 across the two searches -- the candidates never depend on the money).
+
+```
+months   S   before ms   after ms   speedup
+    12   3         4.4        2.8         2x
+    36   3       144.4       66.4         2x
+    36   4       657.6       81.4         8x
+    24  24    115785.9       97.5      1187x
+```
+
+The provided cases are unaffected -- all four still evaluate in single-digit ms. The
+last row is the one that mattered: a legal rules set that took two minutes now takes
+a tenth of a second.
+
+---
+
 # Alternatives considered
 
 - **DP to build the payment vector** -- states of (position, cents allocated so far,
@@ -233,9 +294,10 @@ minima imply different totals ($100 vs $125), as S8 predicts.
   On this reading the flag mostly affects labelling and the tie-break rather than
   structure. `shapes.REQUIRE_NON_BALLOON_TAIL` (default `False`) flips to the stricter
   reading; it costs nothing on the four provided cases.
-- **Cut-set enumeration is `2^(k-1)` worst case** when `max_segments >= k`. Bounded by
-  `k <= 12` here (2048 vectors, ~3ms); a creditor allowing 36 payments would need a
-  smarter search.
+- **Enumeration is still worst-case exponential in theory.** The pruning and
+  memoisation above make `max_segments >= max_payments` tractable (2 minutes -> 0.1s at
+  k=23), but no bound proves it stays that way for every rules set. A creditor allowing
+  many payments with unusual floors could still be slow.
 - **Case 2's shortfall is a calendar artifact, not an affordability problem.** The
   client has exactly enough money, stranded by a 30-day phase mismatch between day-1
   drafts and an end-of-month cadence. Moving `first_payment_date` to 2026-01-01 -- and
