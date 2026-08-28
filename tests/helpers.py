@@ -176,3 +176,38 @@ def assert_valid_schedule(result, client: Client, offer: Offer, rules: CreditorR
         assert balance >= 0, f"balance went negative on {d}"
         if r is not None:
             assert r.balance_cents == balance, f"reported balance wrong on {d}"
+
+
+def random_case(rng):
+    """A randomised but well-formed (client, offer, rules) triple."""
+    from feasibility.models import add_months
+
+    as_of = date(2025, 12, 31)
+    day = rng.choice([1, 5, 15, 28])
+    first = date(2026, 1, day)
+    months = rng.randint(2, 8)
+    draft = rng.choice([5000, 10000, 20000])
+    ledger = [LedgerEntry(add_months(first, i), draft, "credit") for i in range(months)]
+    for _ in range(rng.randint(0, 2)):  # fixed debits from previously settled debts
+        ledger.append(
+            LedgerEntry(add_months(first, rng.randrange(months)), rng.randrange(1000, 20000), "debit")
+        )
+    client = Client(
+        draft, day, first, add_months(first, months - 1), as_of,
+        rng.choice([0, 5000]), ledger,
+    )
+    offer = Offer(
+        "Rng",
+        rng.randrange(20000, 200000),
+        rng.randrange(20000, 200000),
+        rng.choice([0.3, 0.4, 0.5, 0.6]),
+        rng.choice([None, date(2026, 1, 31), date(2026, 1, day), date(2026, 2, 15)]),
+    )
+    k = rng.randint(1, 12)
+    rules = CreditorRules(
+        k, k, rng.choice([1000, 2500, 5000]), rng.randint(0, 6),
+        rng.choice([[], [(3, 5000)], [(7, 5000)]]),
+        rng.random() < 0.25, rng.random() < 0.25, rng.randint(1, 3),
+        rng.choice([0, 500, 1000]), rng.choice([0.0, 0.1, 0.2, 0.25]),
+    )
+    return client, offer, rules

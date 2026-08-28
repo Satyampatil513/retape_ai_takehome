@@ -213,3 +213,54 @@ def test_feasible_offers_report_no_additional_funds():
         assert result.feasible is True
         assert result.additional_funds is None
         assert result.to_dict()["additional_funds"] is None
+
+
+# --------------------------------------------------------------------------
+# Property: the earliest placement is never beaten by a later one
+# --------------------------------------------------------------------------
+
+def test_no_later_placement_ever_needs_a_smaller_lump():
+    """minL(date) is non-decreasing, so placing the lump first is optimal.
+
+    A credit raises the balance on its own date and every date after, so moving
+    it earlier weakly raises the balance everywhere -- and the only cash rule is
+    balance >= 0, with the candidate shapes fixed by the creditor rules rather
+    than by cash. Randomised here because the argument is easy to believe and
+    easy to get wrong.
+
+    Stated as: if L is minimal at the earliest date, then L-1 must fail at every
+    later date too -- otherwise that date would need less.
+    """
+    import random
+    from datetime import timedelta
+
+    from feasibility.funding import bisect, search_ceiling
+    from feasibility.solver import solve
+    from tests.helpers import random_case
+
+    rng = random.Random(20260828)
+    checked = 0
+    for _ in range(120):
+        client, offer, rules = random_case(rng)
+        outcome = solve(client, offer, rules)
+        if outcome.solution is not None or not outcome.structurally_possible:
+            continue  # only infeasible-but-fundable cases have a lump to place
+
+        earliest = client.as_of_date + timedelta(days=1)
+        if earliest > client.last_draft_date:
+            continue
+        best = bisect(
+            lambda v: is_feasible(client, offer, rules, [(earliest, v)]),
+            search_ceiling(client, offer, rules),
+        )
+        if best is None or best <= 1:
+            continue
+
+        checked += 1
+        day = earliest + timedelta(days=1)
+        while day <= client.last_draft_date:
+            assert not is_feasible(client, offer, rules, [(day, best - 1)]), (
+                f"{day} got by with {best - 1}, beating {best} at {earliest}"
+            )
+            day += timedelta(days=1)
+    assert checked >= 20, f"only {checked} usable cases generated; widen the fuzz"
