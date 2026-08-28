@@ -10,7 +10,7 @@ compute the minimum extra funding. Spec: [`ASSIGNMENT.md`](./ASSIGNMENT.md).
 pip install -r requirements.txt
 
 python run.py cases/case1_feasible_even    # evaluate a case, print the Result
-python -m pytest -q                        # 62 tests, ~3s
+python -m pytest -q                        # 65 tests, ~3s
 
 python tools/trace.py cases/case4_tiers    # show the solver's work
 ```
@@ -247,7 +247,7 @@ minima imply different totals ($100 vs $125), as S8 predicts.
 
 # Tests
 
-`python -m pytest -q` -- 62 tests, ~3s.
+`python -m pytest -q` -- 65 tests, ~3s.
 
 The centrepiece is `tests/helpers.py::assert_valid_schedule`, an **independent
 validator** that re-derives the cadence, floors and totals from raw inputs and
